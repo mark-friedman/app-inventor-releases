@@ -43,6 +43,10 @@ body {
   padding-left: 8px;
 }
 
+.ode-ContextMenuItemSeparator {
+  background-color: #d2d2d2;
+}
+
 .ode-CurrentColor {
   padding-left: 0px;
 }
@@ -215,6 +219,13 @@ body {
   color: #FF0000;
   font-family: 'Droid Sans', arial, sans-serif;
 }
+
+.ode-TopPanelLabel {
+  color: #888;
+  font-family: 'Droid Sans', arial, sans-serif;
+  font-size: 15px;
+}
+
 
 /*
  * StatusPanel

@@ -3,15 +3,15 @@
 package com.google.appinventor.server.storage;
 
 import com.google.appengine.api.blobstore.BlobKey;
+import com.google.appengine.api.blobstore.BlobstoreInputStream;
 import com.google.appengine.api.blobstore.BlobstoreServiceFactory;
 import com.google.appengine.api.files.AppEngineFile;
-import com.google.appengine.api.files.FileReadChannel;
 import com.google.appengine.api.files.FileService;
 import com.google.appengine.api.files.FileServiceFactory;
 import com.google.appengine.api.files.FileWriteChannel;
 import com.google.appinventor.server.CrashReport;
-import com.google.appinventor.server.flags.Flag;
 import com.google.appinventor.server.FileExporter;
+import com.google.appinventor.server.flags.Flag;
 import com.google.appinventor.server.storage.StoredData.FileData;
 import com.google.appinventor.server.storage.StoredData.MotdData;
 import com.google.appinventor.server.storage.StoredData.ProjectData;
@@ -45,6 +45,7 @@ import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.ConcurrentModificationException;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
@@ -71,8 +72,6 @@ public class ObjectifyStorageIo implements  StorageIo {
   // TODO(user): need a way to modify this. Also, what is really a good value?
   private static final int MAX_JOB_RETRIES = 10;
 
-  private static final String ANDROID_KEYSTORE_FILENAME = "android.keystore";
-
   // Use this class to define the work of a job that can be retried. The
   // "datastore" argument to run() is the Objectify object for this job
   // (created with ObjectifyService.beginTransaction()). Note that all operations
@@ -80,7 +79,12 @@ public class ObjectifyStorageIo implements  StorageIo {
   @VisibleForTesting
   abstract class JobRetryHelper {
     public abstract void run(Objectify datastore) throws ObjectifyException;
-    public void onNonFatalError() throws ObjectifyException {
+    /*
+     * Called before retrying the job. Note that the underlying datastore
+     * still has the transaction active, so restrictions about operations
+     * over multiple entity groups still apply.
+     */
+    public void onNonFatalError() {
       // Default is to do nothing
     }
   }
@@ -90,6 +94,8 @@ public class ObjectifyStorageIo implements  StorageIo {
   private class Result<T> {
     T t;
   }
+  
+  private FileService fileService;
 
   static {
     // Register the data object classes stored in the database
@@ -102,6 +108,13 @@ public class ObjectifyStorageIo implements  StorageIo {
   }
 
   ObjectifyStorageIo() {
+    fileService = FileServiceFactory.getFileService();
+    initMotd();
+  }
+  
+  // for testing
+  ObjectifyStorageIo(FileService fileService) {
+    this.fileService = fileService;
     initMotd();
   }
 
@@ -110,9 +123,14 @@ public class ObjectifyStorageIo implements  StorageIo {
     return getUser(userId, null);
   }
 
+  /*
+   * Note that the User returned by this method will always have isAdmin set to
+   * false. We leave it to the caller to determine whether the user has admin
+   * priviledges.
+   */
   @Override
   public User getUser(final String userId, final String email) {
-    final User user = new User(userId, email, false);
+    final User user = new User(userId, email, false, false);
     try {
       runJobWithRetries(new JobRetryHelper() {
         @Override
@@ -223,12 +241,13 @@ public class ObjectifyStorageIo implements  StorageIo {
   public long createProject(final String userId, final Project project,
       final String projectSettings) {
     final Result<Long> projectId = new Result<Long>();
+    final List<String> blobsToDelete = new ArrayList<String>();
+    final List<FileData> addedFiles = new ArrayList<FileData>();
+
     try {
       // first job is on the project entity, creating the ProjectData object
       // and the associated files.
       runJobWithRetries(new JobRetryHelper() {
-        List<FileData> addedFiles = new ArrayList<FileData>();
-
         @Override
         public void run(Objectify datastore) throws ObjectifyException {
           long date = System.currentTimeMillis();
@@ -253,28 +272,52 @@ public class ObjectifyStorageIo implements  StorageIo {
           Key<ProjectData> projectKey = projectKey(projectId.t);
           try {
             for (TextFile file : project.getSourceFiles()) {
-              addedFiles.add(createRawFile(projectKey, FileData.RoleEnum.SOURCE, file.getFileName(),
-                  file.getContent().getBytes(DEFAULT_ENCODING)));
+              try {
+                addedFiles.add(createRawFile(projectKey, FileData.RoleEnum.SOURCE,
+                    file.getFileName(), file.getContent().getBytes(DEFAULT_ENCODING)));
+              } catch (BlobWriteException e) {
+                rememberBlobsToDelete();
+                // Note that this makes the BlobWriteException fatal. The job will
+                // not be retried if we get this exception.
+                throw CrashReport.createAndLogError(LOG, null,
+                    collectProjectErrorInfo(userId, projectId.t, file.getFileName()), e);
+              }
             }
           } catch (UnsupportedEncodingException e) {  // shouldn't happen!
+            rememberBlobsToDelete();
             throw CrashReport.createAndLogError(LOG, null, project.getProjectName(), e);
           }
           for (RawFile file : project.getRawSourceFiles()) {
-            addedFiles.add(createRawFile(projectKey, FileData.RoleEnum.SOURCE, file.getFileName(),
-                file.getContent()));
+            try {
+              addedFiles.add(createRawFile(projectKey, FileData.RoleEnum.SOURCE, file.getFileName(),
+                  file.getContent()));
+            } catch (BlobWriteException e) {
+              rememberBlobsToDelete();
+              // Note that this makes the BlobWriteException fatal. The job will
+              // not be retried if we get this exception.
+              throw CrashReport.createAndLogError(LOG, null,
+                  collectProjectErrorInfo(userId, projectId.t, file.getFileName()), e);
+            }
           }
           datastore.put(addedFiles);  // batch put
         }
 
+        @Override
         public void onNonFatalError() {
+          rememberBlobsToDelete();
+        }
+        
+        private void rememberBlobsToDelete() {
           for (FileData addedFile : addedFiles) {
             if (addedFile.isBlob && addedFile.blobstorePath != null) {
-              deleteBlobstoreFile(addedFile.blobstorePath);
+              blobsToDelete.add(addedFile.blobstorePath);
             }
           }
+          // clear addedFiles in case we end up here more than once
+          addedFiles.clear();
         }
       });
-
+            
       // second job is on the user entity
       runJobWithRetries(new JobRetryHelper() {
         @Override
@@ -287,9 +330,23 @@ public class ObjectifyStorageIo implements  StorageIo {
           datastore.put(upd);
         }
       });
-    } catch (ObjectifyException e) {
+    } catch (ObjectifyException e) {          
+      for (FileData addedFile : addedFiles) {
+        if (addedFile.isBlob && addedFile.blobstorePath != null) {
+          blobsToDelete.add(addedFile.blobstorePath);
+        }
+      }
+      // clear addedFiles in case we end up here more than once
+      addedFiles.clear();
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId.t), e);
+    } finally {
+      // Need to delete any orphaned blobs outside of the transaction to avoid multiple entity
+      // group errors. The lookup of the blob key seems to be the thing that
+      // triggers the error.
+      for (String blobToDelete: blobsToDelete) {
+        deleteBlobstoreFile(blobToDelete);
+      }
     }
     return projectId.t;
   }
@@ -300,14 +357,14 @@ public class ObjectifyStorageIo implements  StorageIo {
    *  the database.
    */
   private FileData createRawFile(Key<ProjectData> projectKey, FileData.RoleEnum role,
-      String fileName, byte[] content) throws ObjectifyException {
+      String fileName, byte[] content) throws BlobWriteException, ObjectifyException {
     FileData file = new FileData();
     file.fileName = fileName;
     file.projectKey = projectKey;
     file.role = role;
     if (useBlobstoreForFile(fileName)) {
       file.isBlob = true;
-      file.blobstorePath = uploadToBlobstore(content);
+      file.blobstorePath = uploadToBlobstore(content, makeBlobName(projectKey.getId(), fileName));
     } else {
       file.content = content;
     }
@@ -316,6 +373,8 @@ public class ObjectifyStorageIo implements  StorageIo {
 
   @Override
   public void deleteProject(final String userId, final long projectId) {
+    // blobs associated with the project
+    final List<String> blobPaths = new ArrayList<String>();
     try {
       // first job deletes the UserProjectData in the user's entity group
       runJobWithRetries(new JobRetryHelper() {
@@ -327,18 +386,27 @@ public class ObjectifyStorageIo implements  StorageIo {
           // delete any FileData objects associated with this project
         }
       });
-      // second job delete the project files and ProjectData in the project's
+      // second job deletes the project files and ProjectData in the project's
       // entity group
       runJobWithRetries(new JobRetryHelper() {
         @Override
         public void run(Objectify datastore) {
           Key<ProjectData> projectKey = projectKey(projectId);
           Query<FileData> fdq = datastore.query(FileData.class).ancestor(projectKey);
+          for (FileData fd: fdq) {
+            if (fd.isBlob) {
+              blobPaths.add(fd.blobstorePath);
+            }
+          }
           datastore.delete(fdq);
           // finally, delete the ProjectData object
           datastore.delete(projectKey);
         }
       });
+      // have to delete the blobs outside of the user and project jobs
+      for (String blobPath: blobPaths) {
+        deleteBlobstoreFile(blobPath);
+      }
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
           collectUserProjectErrorInfo(userId, projectId), e);
@@ -721,7 +789,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileNames[0]), e);
+          collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
     }
   }
 
@@ -742,7 +810,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileNames[0]), e);
+          collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
     }
   }
 
@@ -773,7 +841,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       return fd;
     } else if (!fd.role.equals(role)) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectKey.getId(), fileName),
+          collectProjectErrorInfo(null, projectKey.getId(), fileName),
           new IllegalStateException("File role change is not supported"));
     }
     return null;
@@ -791,7 +859,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileNames[0]), e);
+          collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
     }
   }
 
@@ -807,7 +875,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileNames[0]), e);
+          collectProjectErrorInfo(userId, projectId, fileNames[0]), e);
     }
   }
 
@@ -821,7 +889,8 @@ public class ObjectifyStorageIo implements  StorageIo {
         if (fd.role.equals(role)) {
           filesToRemove.add(projectFileKey(projectKey, fileName));
         } else {
-          throw CrashReport.createAndLogError(LOG, null, collectProjectErrorInfo(projectId, fileName),
+          throw CrashReport.createAndLogError(LOG, null,
+              collectProjectErrorInfo(null, projectId, fileName),
               new IllegalStateException("File role change is not supported"));
         }
       }
@@ -895,7 +964,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       return uploadRawFile(projectId, fileName, userId, content.getBytes(encoding));
     } catch (UnsupportedEncodingException e) {
       throw CrashReport.createAndLogError(LOG, null, "Unsupported file content encoding,"
-          + collectProjectErrorInfo(projectId, fileName), e);
+          + collectProjectErrorInfo(null, projectId, fileName), e);
     }
   }
 
@@ -932,7 +1001,14 @@ public class ObjectifyStorageIo implements  StorageIo {
           }
           if (useBlobstore) {
             fd.isBlob = true;
-            fd.blobstorePath = uploadToBlobstore(content);
+            try {
+              fd.blobstorePath = uploadToBlobstore(content, makeBlobName(projectId, fileName));
+            } catch (BlobWriteException e) {
+              // Note that this makes the BlobWriteException fatal. The job will
+              // not be retried if we get this exception.
+              throw CrashReport.createAndLogError(LOG, null,
+                  collectProjectErrorInfo(userId, projectId, fileName), e);
+            }
             // If the content was previously stored in the datastore, clear it out.
             fd.content = null;
           } else {
@@ -943,7 +1019,7 @@ public class ObjectifyStorageIo implements  StorageIo {
         }
 
         @Override
-        public void onNonFatalError() throws ObjectifyException {
+        public void onNonFatalError() {
           if (fd != null && fd.blobstorePath != null) {
             oldBlobstorePath.t = fd.blobstorePath;
           }
@@ -958,27 +1034,32 @@ public class ObjectifyStorageIo implements  StorageIo {
       }
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileName), e);
+          collectProjectErrorInfo(userId, projectId, fileName), e);
     }
     return modTime.t;
   }
 
-  private void deleteBlobstoreFile(String blobstorePath) {
+  protected void deleteBlobstoreFile(String blobstorePath) {
     // It would be nice if there were an AppEngineFile.delete() method but alas there isn't, so we
-    // have to get the BlobKey and delte via the BlobstoreService.
-    AppEngineFile blobstoreFile = new AppEngineFile(blobstorePath);
-    BlobKey blobKey = FileServiceFactory.getFileService().getBlobKey(blobstoreFile);
-    BlobstoreServiceFactory.getBlobstoreService().delete(blobKey);
+    // have to get the BlobKey and delete via the BlobstoreService.
+    BlobKey blobKey = null;
+    try {
+      AppEngineFile blobstoreFile = new AppEngineFile(blobstorePath);
+      blobKey = fileService.getBlobKey(blobstoreFile);
+      BlobstoreServiceFactory.getBlobstoreService().delete(blobKey);
+    } catch (RuntimeException e) {
+      // Log blob delete errors but don't make them fatal
+      CrashReport.createAndLogError(LOG, null, "Error deleting blob with path " +
+          blobstorePath + " and key " + blobKey, e);
+    }
   }
 
-  private String uploadToBlobstore(byte[] content) throws ObjectifyException {
-    // Get a file service
-    FileService fileService = FileServiceFactory.getFileService();
-
+  private String uploadToBlobstore(byte[] content, String name) 
+      throws BlobWriteException, ObjectifyException {
     // Create a new Blob file with generic mime-type "application/octet-stream"
     AppEngineFile blobstoreFile = null;
     try {
-      blobstoreFile = fileService.createNewBlobFile("application/octet-stream");
+      blobstoreFile = fileService.createNewBlobFile("application/octet-stream", name);
 
       // Open a channel to write to it
       FileWriteChannel blobstoreWriteChannel = fileService.openWriteChannel(blobstoreFile, true);
@@ -989,9 +1070,9 @@ public class ObjectifyStorageIo implements  StorageIo {
       blobstoreOutputStream.close();
       blobstoreWriteChannel.closeFinally();
     } catch (IOException e) {
+      throw new BlobWriteException(e, "Error writing blob with name " + name);
+    } catch (Exception e) {
       throw new ObjectifyException(e);
-    } catch (Exception ex) {
-      throw new ObjectifyException(ex);
     }
 
     return blobstoreFile.getFullPath();
@@ -1028,7 +1109,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileName), e);
+          collectProjectErrorInfo(userId, projectId, fileName), e);
     }
     if (oldBlobstorePath.t != null) {
       deleteBlobstoreFile(oldBlobstorePath.t);
@@ -1046,7 +1127,7 @@ public class ObjectifyStorageIo implements  StorageIo {
       return new String(downloadRawFile(userId, projectId, fileName), encoding);
     } catch (UnsupportedEncodingException e) {
       throw CrashReport.createAndLogError(LOG, null, "Unsupported file content encoding, "
-          + collectProjectErrorInfo(projectId, fileName), e);
+          + collectProjectErrorInfo(userId, projectId, fileName), e);
     }
   }
 
@@ -1069,35 +1150,42 @@ public class ObjectifyStorageIo implements  StorageIo {
       });
     } catch (ObjectifyException e) {
       throw CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, fileName), e);
+          collectProjectErrorInfo(userId, projectId, fileName), e);
     }
+    // read the blob outside of the job
     FileData fileData = fd.t;
     if (fileData != null) {
       if (fileData.isBlob) {
         try {
           result.t = getBlobstoreBytes(fileData.blobstorePath);
-        } catch (IOException e) {
+        } catch (BlobReadException e) {
           throw CrashReport.createAndLogError(LOG, null,
-                                              collectProjectErrorInfo(projectId, fileName),
-                                              new FileNotFoundException(fileName));
+              collectProjectErrorInfo(userId, projectId, fileName), e);
         }
       } else {
         result.t = fileData.content;
       }
     } else {
       throw CrashReport.createAndLogError(LOG, null,
-                                          collectProjectErrorInfo(projectId, fileName),
-                                          new FileNotFoundException(fileName));
+          collectProjectErrorInfo(userId, projectId, fileName),
+          new FileNotFoundException("No data for " + fileName));
     }
     return result.t;
   }
 
-  private byte[] getBlobstoreBytes(String blobstorePath) throws IOException {
+  // Note: this must be called outside of any transaction, since getBlobKey()
+  // uses the current transaction and it will most likely have the wrong
+  // entity group!
+  private byte[] getBlobstoreBytes(String blobstorePath) throws BlobReadException {
     AppEngineFile blobstoreFile = new AppEngineFile(blobstorePath);
-    FileReadChannel blobstoreReadChannel =
-        FileServiceFactory.getFileService().openReadChannel(blobstoreFile, false);
-    InputStream blobstoreInputStream = Channels.newInputStream(blobstoreReadChannel);
-    return ByteStreams.toByteArray(blobstoreInputStream);
+    BlobKey blobKey = fileService.getBlobKey(blobstoreFile);    
+    try {
+      InputStream blobInputStream = new BlobstoreInputStream(blobKey);
+      return ByteStreams.toByteArray(blobInputStream);
+    } catch (IOException e) {
+      throw new BlobReadException(e, "Error trying to read blob from " + blobstorePath
+          + ", blobkey = " + blobKey);
+    }
   }
 
   /**
@@ -1110,80 +1198,91 @@ public class ObjectifyStorageIo implements  StorageIo {
 
    * @return  project with the content as requested by params.
    */
+  @Override
   public ProjectSourceZip exportProjectSourceZip(final String userId, final long projectId,
                                                  final boolean includeProjectHistory,
                                                  final boolean includeAndroidKeystore,
                                                  @Nullable String zipName) throws IOException {
     final Result<Integer> fileCount = new Result<Integer>();
     fileCount.t = 0;
+    final Result<String> projectHistory = new Result<String>();
+    projectHistory.t = null;
+    // We collect up all the file data for the project in a transaction but
+    // then we read the data and write the zip file outside of the transaction
+    // to avoid problems reading blobs in a transaction with the wrong
+    // entity group.
+    final List<FileData> fileData = new ArrayList<FileData>();
     final Result<String> projectName = new Result<String>();
-    projectName.t = "";
-
+    projectName.t = null;
+    String fileName = null;
+    
     ByteArrayOutputStream zipFile = new ByteArrayOutputStream();
     final ZipOutputStream out = new ZipOutputStream(zipFile);
-
+    
     try {
       runJobWithRetries(new JobRetryHelper() {
         @Override
         public void run(Objectify datastore) {
-          try {
-            Key<ProjectData> projectKey = projectKey(projectId);
-            List<String> fileList = new ArrayList<String>();
-            for (FileData fd : datastore.query(FileData.class).ancestor(projectKey)) {
-              if (fd.role.equals(FileData.RoleEnum.SOURCE)) {
-                String fileName = fd.fileName;
-
-                if (fileName.equals(FileExporter.REMIX_INFORMATION_FILE_PATH)) {
-                  // Skip legacy remix history files that were previous stored with the project
-                  continue;
-                }
-                byte[] data;
-                if (fd.isBlob) {
-                  data = getBlobstoreBytes(fd.blobstorePath);
-                } else {
-                  data = fd.content;
-                }
-                out.putNextEntry(new ZipEntry(fileName));
-                out.write(data, 0, data.length);
-                out.closeEntry();
-                fileCount.t++;
+          Key<ProjectData> projectKey = projectKey(projectId);
+          boolean foundFiles = false;
+          for (FileData fd : datastore.query(FileData.class).ancestor(projectKey)) {
+            String fileName = fd.fileName;
+            if (fd.role.equals(FileData.RoleEnum.SOURCE)) {
+              if (fileName.equals(FileExporter.REMIX_INFORMATION_FILE_PATH)) {
+                // Skip legacy remix history files that were previous stored with the project
+                continue;
               }
+              fileData.add(fd);
+              foundFiles = true;
             }
-
-            if (fileCount.t > 0) {
-              ProjectData pd = datastore.find(projectKey(projectId));
-              if (includeProjectHistory) {
-                if (!Strings.isNullOrEmpty(pd.history)) {
-                  byte[] data = pd.history.getBytes(StorageUtil.DEFAULT_CHARSET);
-                  out.putNextEntry(new ZipEntry(FileExporter.REMIX_INFORMATION_FILE_PATH));
-                  out.write(data, 0, data.length);
-                  out.closeEntry();
-                  fileCount.t++;
-                }
-              }
-              projectName.t = pd.name;
+          }
+          if (foundFiles) {
+            ProjectData pd = datastore.find(projectKey);
+            projectName.t = pd.name;
+            if (includeProjectHistory && !Strings.isNullOrEmpty(pd.history)) {
+              projectHistory.t = pd.history;
             }
-
-          } catch (IOException e) {
-            System.err.println("Unexpected io exception for userid " + userId +
-                               " projectId " + projectId);
-            throw CrashReport.createAndLogError(LOG, null,
-                                                collectProjectErrorInfo(projectId, null), e);
           }
         }
       });
+
+      // Process the file contents outside of the job since we can't read
+      // blobs in the job.
+      for (FileData fd : fileData) {
+        fileName = fd.fileName;
+        byte[] data;
+        if (fd.isBlob) {
+          try {
+            data = getBlobstoreBytes(fd.blobstorePath);
+          } catch (BlobReadException e) {
+            throw CrashReport.createAndLogError(LOG, null,
+                collectProjectErrorInfo(userId, projectId, fileName), e);
+          }
+        } else {
+          data = fd.content;
+        }
+        out.putNextEntry(new ZipEntry(fileName));
+        out.write(data, 0, data.length);
+        out.closeEntry();
+        fileCount.t++;
+      }
+      if (projectHistory.t != null) {
+        byte[] data = projectHistory.t.getBytes(StorageUtil.DEFAULT_CHARSET);
+        out.putNextEntry(new ZipEntry(FileExporter.REMIX_INFORMATION_FILE_PATH));
+        out.write(data, 0, data.length);
+        out.closeEntry();
+        fileCount.t++;
+      }
     } catch (ObjectifyException e) {
-      System.err.println("Unexpected objectify exception for userid " + userId +
-          " projectId " + projectId);
       CrashReport.createAndLogError(LOG, null,
-          collectProjectErrorInfo(projectId, null), e);
+          collectProjectErrorInfo(userId, projectId, fileName), e);
       throw new IOException("Reflecting exception for userid " + userId +
-          " projectId " + projectId);
+          " projectId " + projectId + ", original exception " + e.getMessage());
     } catch (RuntimeException e) {
-      System.err.println("Unexpected runtime exception for userid " + userId +
-          " projectId " + projectId);
+      CrashReport.createAndLogError(LOG, null,
+          collectProjectErrorInfo(userId, projectId, fileName), e);
       throw new IOException("Reflecting exception for userid " + userId +
-          " projectId " + projectId);
+          " projectId " + projectId + ", original exception " + e.getMessage());
     }
 
     if (fileCount.t == 0) {
@@ -1199,18 +1298,18 @@ public class ObjectifyStorageIo implements  StorageIo {
               try {
                 Key<UserData> userKey = userKey(userId);
                 for (UserFileData ufd : datastore.query(UserFileData.class).ancestor(userKey)) {
-                  if (ufd.fileName.equals(ANDROID_KEYSTORE_FILENAME) && (ufd.content.length > 0)) {
-                    out.putNextEntry(new ZipEntry(ANDROID_KEYSTORE_FILENAME));
+                  if (ufd.fileName.equals(StorageUtil.ANDROID_KEYSTORE_FILENAME) &&
+                      (ufd.content.length > 0)) {
+                    out.putNextEntry(new ZipEntry(StorageUtil.ANDROID_KEYSTORE_FILENAME));
                     out.write(ufd.content, 0, ufd.content.length);
                     out.closeEntry();
                     fileCount.t++;
                   }
                 }
               } catch (IOException e) {
-                System.err.println("Unexpected io exception for userid " + userId +
-                                   " projectId " + projectId);
                 throw CrashReport.createAndLogError(LOG, null,
-                                                    collectProjectErrorInfo(projectId, null), e);
+                    collectProjectErrorInfo(userId, projectId, 
+                        StorageUtil.ANDROID_KEYSTORE_FILENAME), e);
               }
             }
           });
@@ -1250,6 +1349,18 @@ public class ObjectifyStorageIo implements  StorageIo {
     }
     return motd.t;
   }
+  
+  @Override
+  public String findUserByEmail(final String email) throws NoSuchElementException {
+    Objectify datastore = ObjectifyService.begin();
+    // note: if there are multiple users with the same email we'll only
+    // get the first one. we don't expect this to happen
+    UserData userData = datastore.query(UserData.class).filter("email", email).get();
+    if (userData == null) {
+      throw new NoSuchElementException("Couldn't find a user with email " + email);
+    }
+    return userData.id;
+  }
 
   private void initMotd() {
     try {
@@ -1272,6 +1383,13 @@ public class ObjectifyStorageIo implements  StorageIo {
       throw CrashReport.createAndLogError(LOG, null, "Initing MOTD", e);
     }
   }
+  
+  // Create a name for a blob from a project id and file name. This is mostly
+  // to help with debugging and viewing the blobstore via the admin console.
+  // We don't currently use these blob names anywhere else.
+  private String makeBlobName(long projectId, String fileName) {
+    return projectId + "/" + fileName;
+  }
 
   private Key<UserData> userKey(String userId) {
     return new Key<UserData>(UserData.class, userId);
@@ -1293,6 +1411,15 @@ public class ObjectifyStorageIo implements  StorageIo {
     return new Key<FileData>(projectKey, FileData.class, fileName);
   }
 
+  /**
+   * Call job.run() in a transaction and commit the transaction if no exceptions
+   * occur. If we get a {@link java.util.ConcurrentModificationException}
+   * or {@link com.google.appinventor.server.storage.ObjectifyException}
+   * we will retry the job (at most {@code MAX_JOB_RETRIES times}).
+   * Any other exception will cause the job to fail immediately.
+   * @param job
+   * @throws ObjectifyException
+   */
   @VisibleForTesting
   void runJobWithRetries(JobRetryHelper job) throws ObjectifyException {
     int tries = 0;
@@ -1306,10 +1433,16 @@ public class ObjectifyStorageIo implements  StorageIo {
         job.onNonFatalError();
         LOG.log(Level.WARNING, "Optimistic concurrency failure", ex);
       } catch (ObjectifyException oe) {
+        // maybe this should be a fatal error? I think the only thing
+        // that creates this exception (other than this method) is uploadToBlobstore
         job.onNonFatalError();
       } finally {
         if (datastore.getTxn().isActive()) {
-          datastore.getTxn().rollback();
+          try {
+            datastore.getTxn().rollback();
+          } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Transaction rollback failed", e);
+          }
         }
       }
       tries++;
@@ -1327,8 +1460,9 @@ public class ObjectifyStorageIo implements  StorageIo {
     return "user=" + userId + ", file=" + fileName;
   }
 
-  private static String collectProjectErrorInfo(final long projectId, final String fileName) {
-    return "project=" + projectId + ", file=" + fileName;
+  private static String collectProjectErrorInfo(final String userId, final long projectId,
+      final String fileName) {
+    return "user=" + userId + ", project=" + projectId + ", file=" + fileName;
   }
 
   private static String collectUserProjectErrorInfo(final String userId, final long projectId) {

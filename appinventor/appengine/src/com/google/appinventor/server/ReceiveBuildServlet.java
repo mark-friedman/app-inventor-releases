@@ -2,9 +2,11 @@
 
 package com.google.appinventor.server;
 
+import com.google.appinventor.server.encryption.EncryptionException;
 import com.google.appinventor.server.project.utils.Security;
 import com.google.appinventor.server.storage.StorageIo;
 import com.google.appinventor.server.storage.StorageIoInstanceHolder;
+import com.google.appinventor.shared.storage.StorageUtil;
 import com.google.common.io.ByteStreams;
 
 import java.io.IOException;
@@ -32,7 +34,6 @@ public class ReceiveBuildServlet extends OdeServlet {
 
   private final OdeAuthFilter odeFilter = new OdeAuthFilter();
   private final transient StorageIo storageIo = StorageIoInstanceHolder.INSTANCE;
-  private static final String ANDROID_KEYSTORE_FILENAME = "android.keystore";
 
   @Override
   public void doPost(HttpServletRequest req, HttpServletResponse resp) throws IOException {
@@ -44,8 +45,14 @@ public class ReceiveBuildServlet extends OdeServlet {
     // will throw an ArrayIndexOutOfBoundsException. We could deal with that outcome more cleanly
     // by returning an HTTP error code. This applies to all of our servlets.
 
-    String userId = Security.decryptUserId(uriComponents[3]);
-    long projectId = Security.decryptProjectId(uriComponents[3]);
+    String userId;
+    long projectId;
+    try {
+      userId = Security.decryptUserId(uriComponents[3]);
+      projectId = Security.decryptProjectId(uriComponents[3]);
+    } catch (EncryptionException e) {
+      throw CrashReport.createAndLogError(LOG, req, null, e);
+    }
 
     // Set the user in the OdeFilter, which is used everywhere as the UserInfoProvider.
     odeFilter.setUserFromUserId(userId);
@@ -59,9 +66,9 @@ public class ReceiveBuildServlet extends OdeServlet {
         }
         String fileName = zipEntry.getName();
         byte[] fileBytes = ByteStreams.toByteArray(zipInputStream);
-        if (ANDROID_KEYSTORE_FILENAME.equals(fileName)) {
+        if (StorageUtil.ANDROID_KEYSTORE_FILENAME.equals(fileName)) {
           LOG.info("Saving android.keystore for user: " + userId);
-          storageIo.addFilesToUser(userId, ANDROID_KEYSTORE_FILENAME);
+          storageIo.addFilesToUser(userId, StorageUtil.ANDROID_KEYSTORE_FILENAME);
           storageIo.uploadRawUserFile(userId, fileName, fileBytes);
         } else {
           String filePath = buildFileDirPath + "/" + fileName;

@@ -3,6 +3,8 @@
 package com.google.appinventor.server;
 
 import com.google.appinventor.common.utils.StringUtils;
+import com.google.appinventor.server.storage.StorageIo;
+import com.google.appinventor.server.storage.StorageIoInstanceHolder;
 import com.google.appinventor.server.util.CacheHeaders;
 import com.google.appinventor.server.util.CacheHeadersImpl;
 import com.google.appinventor.shared.rpc.ServerLayout;
@@ -11,6 +13,7 @@ import com.google.appinventor.shared.rpc.project.RawFile;
 import com.google.appinventor.shared.storage.StorageUtil;
 
 import java.io.IOException;
+import java.util.NoSuchElementException;
 import java.util.logging.Logger;
 
 import javax.servlet.ServletOutputStream;
@@ -27,36 +30,48 @@ public class DownloadServlet extends OdeServlet {
    * URIs for download requests are structured as follows:
    *    /<baseurl>/download/project-output/<projectId>/{<target>}
    *    /<baseurl>/download/project-source/<projectId>/{<title>}
+   *    /<baseurl>/download/user-project-source/<projectIdOrName>/<userIdOrEmail>
    *    /<baseurl>/download/all-projects-source
    *    /<baseurl>/download/file/<projectId>/<file-path>
-   * </pre>
+   *    /<baseurl>/download/userfile/<file-path>
    */
 
   // Constants for accessing split URI
   /*
    * Download kind can be: "project-output", "project-source",
-   * "all-projects-source", or "file".
+   * "all-projects-source", "file", or "userfile".
    * Constants for these are defined in ServerLayout.
    */
   private static final int DOWNLOAD_KIND_INDEX = 3;
+
+  // PROJECT_ID_INDEX is used for more than one download kind
   private static final int PROJECT_ID_INDEX = 4;
 
-  // NOTE(lizlooney) - currently all the SPLIT_LIMIT_... constants are 6, but
-  // the code does not assume that.
-
   // Constants used when download kind is "project-output".
+  // PROJECT_ID_INDEX = 4 (declared above)
   private static final int TARGET_INDEX = 5;
   private static final int SPLIT_LIMIT_PROJECT_OUTPUT = 6;
 
   // Constants used when download kind is "project-source".
   // Since the project title may contain slashes, it must be the last component in the URI.
+  // PROJECT_ID_INDEX = 4 (declared above)
   private static final int PROJECT_TITLE_INDEX = 5;
   private static final int SPLIT_LIMIT_PROJECT_SOURCE = 6;
 
-  // Constants used when download kind is "project-source".
+  // Constants used when download kind is "user-project-source".
+  private static final int USER_PROJECT_USERID_INDEX = 5;
+  private static final int SPLIT_LIMIT_USER_PROJECT_SOURCE = 6;
+
+  // Constants used when download kind is "file".
   // Since the file path may contain slashes, it must be the last component in the URI.
+  // PROJECT_ID_INDEX = 4 (declared above)
   private static final int FILE_PATH_INDEX = 5;
   private static final int SPLIT_LIMIT_FILE = 6;
+
+  // Constants used when download kind is "userfile".
+  // Since the file path may contain slashes, it must be the last component in the URI.
+  private static final int USERFILE_PATH_INDEX = 4;
+  private static final int SPLIT_LIMIT_USERFILE = 5;
 
 
   // Logging support
@@ -78,26 +93,26 @@ public class DownloadServlet extends OdeServlet {
 
     RawFile downloadableFile;
 
+    String userId = null;
+
     try {
       String uri = req.getRequestURI();
       // First, call split with no limit parameter.
       String[] uriComponents = uri.split("/");
       String downloadKind = uriComponents[DOWNLOAD_KIND_INDEX];
-      String userId = userInfoProvider.getUserId();
-      long projectId = 0;
-      // When downloading all projects, no project id is specified.
-      if (!downloadKind.equals(ServerLayout.DOWNLOAD_ALL_PROJECTS_SOURCE)) {
-        projectId = Long.parseLong(uriComponents[PROJECT_ID_INDEX]);
-      }
+      
+      userId = userInfoProvider.getUserId();
 
       if (downloadKind.equals(ServerLayout.DOWNLOAD_PROJECT_OUTPUT)) {
         // Download project output file.
         uriComponents = uri.split("/", SPLIT_LIMIT_PROJECT_OUTPUT);
+        long projectId = Long.parseLong(uriComponents[PROJECT_ID_INDEX]);
         String target = (uriComponents.length > TARGET_INDEX) ? uriComponents[TARGET_INDEX] : null;
         downloadableFile = fileExporter.exportProjectOutputFile(userId, projectId, target);
 
       } else if (downloadKind.equals(ServerLayout.DOWNLOAD_PROJECT_SOURCE)) {
         // Download project source files as a zip.
+        long projectId = Long.parseLong(uriComponents[PROJECT_ID_INDEX]);
         uriComponents = uri.split("/", SPLIT_LIMIT_PROJECT_SOURCE);
         String projectTitle = (uriComponents.length > PROJECT_TITLE_INDEX) ?
             uriComponents[PROJECT_TITLE_INDEX] : null;
@@ -108,6 +123,57 @@ public class DownloadServlet extends OdeServlet {
             projectId, includeProjectHistory, false, zipName);
         downloadableFile = zipFile.getRawFile();
 
+      } else if (downloadKind.equals(ServerLayout.DOWNLOAD_USER_PROJECT_SOURCE)) {
+        // Download project source files for the specified user project as a zip.
+        uriComponents = uri.split("/", SPLIT_LIMIT_USER_PROJECT_SOURCE);
+        
+        String userIdOrEmail = uriComponents[USER_PROJECT_USERID_INDEX];
+        String projectUserId;
+        StorageIo storageIo = StorageIoInstanceHolder.INSTANCE;
+        if (userIdOrEmail.contains("@")) {
+          // email address
+          try {
+            projectUserId = storageIo.findUserByEmail(userIdOrEmail);
+          } catch (NoSuchElementException e) {
+            throw new IllegalArgumentException(e.getMessage());
+          }
+        } else {
+          projectUserId = userIdOrEmail;
+        }
+
+        String projectIdOrName = uriComponents[PROJECT_ID_INDEX];
+        String projectName;
+        long projectId = 0;
+        try {
+          // try to parse the projectIdOrName as a number, since project names
+          // must start with a letter.
+          projectId = Long.parseLong(projectIdOrName);
+          projectName = storageIo.getProjectName(projectUserId, projectId);
+        } catch (NumberFormatException e) {
+          // assume we got a name instead
+          for (Long pid: storageIo.getProjects(projectUserId)) {
+            if (storageIo.getProjectName(projectUserId, pid).equals(projectIdOrName)) {
+              projectId = pid;
+            }
+          }
+          if (projectId == 0) {
+            // didn't find project by name
+            throw new IllegalArgumentException("Can't find a project named " 
+                + projectIdOrName + " for user id " + projectUserId);
+          } else {
+            projectName = projectIdOrName;
+          }
+        }
+        String zipName;
+        if (!projectName.isEmpty()) {
+          zipName = projectName + "_" + projectUserId + ".zip";
+        } else {
+          zipName = "u" + projectUserId + "_p" + projectId + ".zip";
+        }
+        ProjectSourceZip zipFile = fileExporter.exportProjectSourceZip(projectUserId,
+            projectId, /* include history*/ true, /* include keystore */ true, zipName);
+        downloadableFile = zipFile.getRawFile();
+        
       } else if (downloadKind.equals(ServerLayout.DOWNLOAD_ALL_PROJECTS_SOURCE)) {
         // Download all project source files as a zip of zips.
         ProjectSourceZip zipFile = fileExporter.exportAllProjectsSourceZip(
@@ -117,15 +183,26 @@ public class DownloadServlet extends OdeServlet {
       } else if (downloadKind.equals(ServerLayout.DOWNLOAD_FILE)) {
         // Download a specific file.
         uriComponents = uri.split("/", SPLIT_LIMIT_FILE);
+        long projectId = Long.parseLong(uriComponents[PROJECT_ID_INDEX]);
         String filePath = (uriComponents.length > FILE_PATH_INDEX) ?
             uriComponents[FILE_PATH_INDEX] : null;
         downloadableFile = fileExporter.exportFile(userId, projectId, filePath);
+
+      } else if (downloadKind.equals(ServerLayout.DOWNLOAD_USERFILE)) {
+        // Download a specific user file, such as android.keystore
+        uriComponents = uri.split("/", SPLIT_LIMIT_USERFILE);
+        if (uriComponents.length > USERFILE_PATH_INDEX) {
+          String filePath = uriComponents[USERFILE_PATH_INDEX];
+          downloadableFile = fileExporter.exportUserFile(userId, filePath);
+        } else {
+          throw new IllegalArgumentException("Missing user file path.");
+        }
 
       } else {
         throw new IllegalArgumentException("Unknown download kind: " + downloadKind);
       }
     } catch (IllegalArgumentException e) {
-      throw CrashReport.createAndLogError(LOG, req, null, e);
+      throw CrashReport.createAndLogError(LOG, req, "user=" + userId, e);
     }
 
     String fileName = downloadableFile.getFileName();

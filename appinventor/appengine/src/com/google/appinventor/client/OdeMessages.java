@@ -116,8 +116,8 @@ public interface OdeMessages extends Messages {
   // Used in Ode.java
 
   // TODO(user): Replace with commented version once we're ready
-  @DefaultMessage("App Inventor for Android - Experimental Version")
-//  @DefaultMessage("App Inventor for Android")
+  @DefaultMessage("App Inventor for Android - Beta")
+  //  @DefaultMessage("App Inventor for Android")
   @Description("Title for App Inventor")
   String titleYoungAndroid();
 
@@ -185,6 +185,10 @@ public interface OdeMessages extends Messages {
   @DefaultMessage("Terms")
   @Description("Label of the link for Terms")
   String termsLink();
+  
+  @DefaultMessage("Privacy Policy and Terms of Use")
+  @Description("Label of the link for Privacy and Terms of Use")
+  String privacyTermsLink();
 
   // Used in TopPanel.java
 
@@ -667,6 +671,18 @@ public interface OdeMessages extends Messages {
   @Description("Label of the button to download all projects' source code")
   String downloadAllButton();
 
+  @DefaultMessage("Download Keystore")
+  @Description("Label of the button for download keystore")
+  String downloadKeystoreButton();
+
+  @DefaultMessage("Upload Keystore")
+  @Description("Label of the button for upload keystore")
+  String uploadKeystoreButton();
+
+  @DefaultMessage("Delete Keystore")
+  @Description("Label of the button for delete keystore")
+  String deleteKeystoreButton();
+
   @DefaultMessage("It may take a little while for your projects to be downloaded. " +
       "Please be patient...")
   @Description("Warning that downloading projects will take a while")
@@ -675,6 +691,34 @@ public interface OdeMessages extends Messages {
   @DefaultMessage("More Actions")
   @Description("Label of the button leading to more cascade items")
   String moreActionsButton();
+  
+  @DefaultMessage("Download User Source")
+  @Description("Label of the button for admins to download a user's project source")
+  String downloadUserSourceButton();
+  
+  @DefaultMessage("Download User Source")
+  @Description("Title of the dialog box for downloading a user's project source")
+  String downloadUserSourceDialogTitle();
+  
+  @DefaultMessage("User id or email (case-sensitive):")
+  @Description("Label for the user id input text box")
+  String userIdLabel();
+
+  @DefaultMessage("Project id or name:")
+  @Description("Label for the project id input text box")
+  String projectIdLabel();
+  
+  @DefaultMessage("Please specify both a user email address or id and a project name or id " +
+      "for the project to be downloaded. Ids are numeric and may come from the system " +
+      "logs or from browsing the Datastore. If you use an email address, it must match " +
+      "exactly the stored email address in the Datastore. Similarly, project names must " +
+      "match exactly. Both are case sensitive.")
+  @Description("Error message reported when user id or project id is missing")
+  String invalidUserIdOrProjectIdError();
+  
+  @DefaultMessage("Admin")
+  @Description("Label of the button leading to admin functionality")
+  String adminButton();
 
   @DefaultMessage("Please select a project to delete")
   @Description("Error message displayed when no project is selected")
@@ -695,6 +739,49 @@ public interface OdeMessages extends Messages {
   @DefaultMessage("One project must be selected")
   @Description("Error message displayed when no or many projects are selected")
   String wrongNumberProjectsSelected();
+
+  @DefaultMessage("Server error: could not download your keystore file.")
+  @Description("Error message displayed when a server error occurs during download keystore")
+  String downloadKeystoreError();
+
+  @DefaultMessage("There is no keystore file to download.")
+  @Description("Error message displayed when no keystore file exists")
+  String noKeystoreToDownload();
+
+  @DefaultMessage("Server error: could not upload your keystore file.")
+  @Description("Error message displayed when a server error occurs during upload keystore")
+  String uploadKeystoreError();
+
+  @DefaultMessage("Do you want to overwrite your keystore file?\n\n" +
+      "If you agree, your old keystore file will be completely removed from the App Inventor " +
+      "server.\n\n" +
+      "Any projects that you package in the future will be signed using your new keystore file. " +
+      "Changing the keystore affects the ability to reinstall previously installed apps. If you " +
+      "are not sure that you want to do this, please read the documentation about keystores by " +
+      "clicking above on \"Learn\", then \"Troubleshooting\", and then \"Keystores and Signing " +
+      "of Applications\"\n\n" +
+      "There is no undo for overwriting your keystore file.")
+  @Description("Confirmation message shown when keystore is about to be overwritten.")
+  String confirmOverwriteKeystore();
+
+  @DefaultMessage("Server error: could not delete your keystore file.")
+  @Description("Error message reported when a server error occurs during delete keystore")
+  String deleteKeystoreError();
+
+  @DefaultMessage("Do you really want to delete your keystore file?\n\n" +
+      "If you agree, your old keystore file will be completely removed from the App Inventor " +
+      "server. A new, but different, keystore file will be created automatically the next time " +
+      "you package a project for the phone.\n\n" +
+      "Any projects that you package in the future will be signed using your new keystore file. " +
+      "Changing the keystore affects the ability to reinstall previously installed apps. If you " +
+      "are not sure that you want to do this, please read the documentation about keystores by " +
+      "clicking above on \"Learn\", then \"Troubleshooting\", and then \"Keystores and Signing " +
+      "of Applications\"\n\n" +
+      "There is no undo for deleting your keystore file.")
+  @Description("Confirmation message for delete keystore")
+  String confirmDeleteKeystore();
+
+
 
   // Used in output/OdeLog.java
 
@@ -771,6 +858,11 @@ public interface OdeMessages extends Messages {
   @Description("Caption for file upload wizard.")
   String fileUploadWizardCaption();
 
+  @DefaultMessage("File names can contain only unaccented letters, numbers, and the characters " +
+		  "\"-\", \"_\", \".\", \"!\", \"~\", \"*\", \"(\", and \")\"")
+  @Description("Error message when file name contains characters that would require URL encoding.")
+  String malformedFilename();
+  
   @DefaultMessage("Uploading {0} to the App Inventor server")
   @Description("Message displayed when an asset is uploaded.")
   String fileUploadingMessage(String filename);
@@ -792,6 +884,20 @@ public interface OdeMessages extends Messages {
   @Description("Confirmation message shown when a file is about to be overwritten.")
   String confirmOverwrite(String filename);
 
+  // Used in wizards/KeystoreUploadWizard.java
+
+  @DefaultMessage("Upload Keystore...")
+  @Description("Caption for keystore upload wizard.")
+  String keystoreUploadWizardCaption();
+
+  @DefaultMessage("Server error: could not upload keystore. Please try again later!")
+  @Description("Error message reported when the keystore couldn't be uploaded to the server.")
+  String keystoreUploadError();
+
+  @DefaultMessage("The selected file is not a keystore!")
+  @Description("Error message reported when the file selected for upload is not a keystore.")
+  String notKeystoreError();
+
   // Used in wizards/NewProjectWizard.java
 
   @DefaultMessage("Server error: could not create project. Please try again later!")
@@ -808,7 +914,8 @@ public interface OdeMessages extends Messages {
   @Description("Error message reported when a project couldn't be uploaded to the server.")
   String projectUploadError();
 
-  @DefaultMessage("The selected project is not a project archive!")
+  @DefaultMessage("The selected project is not a project source file!\n" +
+      "Project source files are zip files.")
   @Description("Error message reported when the file selected for upload is not a project archive.")
   String notProjectArchiveError();
 

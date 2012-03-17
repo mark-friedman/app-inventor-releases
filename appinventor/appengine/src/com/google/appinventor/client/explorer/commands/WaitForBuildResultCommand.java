@@ -2,6 +2,8 @@
 
 package com.google.appinventor.client.explorer.commands;
 
+import static com.google.appinventor.client.Ode.MESSAGES;
+
 import com.google.appinventor.client.ErrorReporter;
 import com.google.appinventor.client.Ode;
 import com.google.appinventor.client.OdeAsyncCallback;
@@ -25,8 +27,6 @@ import com.google.gwt.user.client.Timer;
 import com.google.gwt.user.client.Window;
 
 import java.util.Date;
-
-import static com.google.appinventor.client.Ode.MESSAGES;
 
 /**
  * Command to wait for the result of a build
@@ -86,10 +86,13 @@ public class WaitForBuildResultCommand extends ChainableCommand {
         Tracking.trackEvent(Tracking.PROJECT_EVENT, Tracking.PROJECT_SUBACTION_BUILD_YA,
                             node.getName(), getElapsedMillis());
         if (result.succeeded()) {
+          ode.getProjectToolbar().updateKeystoreButtons();
           executeNextCommand(node);
         } else if (result.getResult() == 1) {
           // General build error
-          ErrorReporter.reportError(MESSAGES.buildFailedError());
+          String errorMsg = result.getError();
+          ErrorReporter.reportError(MESSAGES.buildFailedError() + 
+              (errorMsg.isEmpty() ? "" : " " + errorMsg));
           executionFailedOrCanceled();
         } else if (result.getResult() == 2) {
           // Yail generation error

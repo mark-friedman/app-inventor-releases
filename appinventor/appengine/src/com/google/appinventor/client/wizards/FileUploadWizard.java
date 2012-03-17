@@ -2,9 +2,10 @@
 
 package com.google.appinventor.client.wizards;
 
+import static com.google.appinventor.client.Ode.MESSAGES;
+
 import com.google.appinventor.client.ErrorReporter;
 import com.google.appinventor.client.Ode;
-import static com.google.appinventor.client.Ode.MESSAGES;
 import com.google.appinventor.client.OdeAsyncCallback;
 import com.google.appinventor.client.explorer.project.Project;
 import com.google.appinventor.client.output.OdeLog;
@@ -18,6 +19,7 @@ import com.google.appinventor.shared.rpc.project.ProjectNode;
 import com.google.appinventor.shared.rpc.project.youngandroid.YoungAndroidAssetNode;
 import com.google.appinventor.shared.rpc.project.youngandroid.YoungAndroidAssetsFolder;
 import com.google.gwt.core.client.GWT;
+import com.google.gwt.http.client.URL;
 import com.google.gwt.user.client.Command;
 import com.google.gwt.user.client.Window;
 import com.google.gwt.user.client.rpc.AsyncCallback;
@@ -77,7 +79,10 @@ public class FileUploadWizard extends Wizard {
         String uploadFilename = upload.getFilename();
         if (!uploadFilename.isEmpty()) {
           final String filename = makeValidFilename(uploadFilename);
-
+          if(filename.contains("'")||!filename.equals(URL.encodeComponent(filename))){
+              Window.alert(MESSAGES.malformedFilename());
+              return;
+          }
           if (fileAlreadyExists(folderNode, filename)) {
             if (!confirmOverwrite(folderNode, filename)) {
               return;
@@ -88,8 +93,9 @@ public class FileUploadWizard extends Wizard {
 
           // Use the folderNode's project id and file id in the upload URL so that the file is
           // uploaded into that project and that folder in our back-end storage.
-          String uploadUrl = GWT.getModuleBaseURL() + ServerLayout.UPLOAD_SERVLET +  "/file/" +
-              folderNode.getProjectId() + "/" + folderNode.getFileId() + "/" + filename;
+          String uploadUrl = GWT.getModuleBaseURL() + ServerLayout.UPLOAD_SERVLET + "/" +
+              ServerLayout.UPLOAD_FILE + "/" + folderNode.getProjectId() + "/" +
+              folderNode.getFileId() + "/" + filename;
           Uploader.getInstance().upload(upload, uploadUrl,
               new OdeAsyncCallback<UploadResponse>(MESSAGES.fileUploadError()) {
                 @Override

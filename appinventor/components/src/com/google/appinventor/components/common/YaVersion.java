@@ -157,8 +157,13 @@ public class YaVersion {
   // For YOUNG_ANDROID_VERSION 51:
   // - CANVAS_VERSION was incremented to 5.
   // - BLOCKS_LANGUAGE_VERSION was incremented to 16.
+  // For YOUNG_ANDROID_VERSION 52:
+  // - BLOCKS_LANGUAGE_VERSION was incremented to 17.
+  // For YOUNG_ANDROID_VERSION 53:
+  // - BLUETOOTHCLIENT_COMPONENT_VERSION was incremented to 5.
+  // - BLUETOOTHSERVER_COMPONENT_VERSION was incremented to 5.
 
-  public static final int YOUNG_ANDROID_VERSION = 51;
+  public static final int YOUNG_ANDROID_VERSION = 53;
 
   // ............................... Blocks Language Version Number ...............................
 
@@ -201,7 +206,16 @@ public class YaVersion {
   // - Added "is text empty?" to Text drawer.
   // For BLOCKS_LANGUAGE_VERSION 16:
   // - Added make-color and split-color to Color drawer.
-  public static final int BLOCKS_LANGUAGE_VERSION = 16;
+  // For BLOCKS_LANGUAGE_VERSION 17:
+  // Changed open-screen to open-another-screen
+  // Changed open-screen-with-start-text to open-another-screen-with-start-value
+  // Marked get-startup-text as a bad block
+  // Added get-start-value
+  // Added get-plain-start-text
+  // Marked close-screen-with-result as a bad block
+  // Added close-screen-with-value
+  // Added close-screen-with-plain-text
+  public static final int BLOCKS_LANGUAGE_VERSION = 17;
 
   // ................................. Component Version Numbers ..................................
 
@@ -242,16 +256,20 @@ public class YaVersion {
   // For BLUETOOTHCLIENT_COMPONENT_VERSION 3:
   // - The BluetoothClient.BluetoothError event was marked userVisible false and is no longer used.
   // For BLUETOOTHCLIENT_COMPONENT_VERSION 4:
-  // - The BluetoothClient.DelimiterByte propery was added.
-  public static final int BLUETOOTHCLIENT_COMPONENT_VERSION = 4;
+  // - The BluetoothClient.DelimiterByte property was added.
+  // For BLUETOOTHCLIENT_COMPONENT_VERSION 5:
+  // - The BluetoothClient.Secure property was added.
+  public static final int BLUETOOTHCLIENT_COMPONENT_VERSION = 5;
 
   // For BLUETOOTHSERVER_COMPONENT_VERSION 2:
   // - The BluetoothServer.Enabled property was added.
   // For BLUETOOTHSERVER_COMPONENT_VERSION 3:
   // - The BluetoothServer.BluetoothError event was marked userVisible false and is no longer used.
   // For BLUETOOTHSERVER_COMPONENT_VERSION 4:
-  // - The BluetoothServer.DelimiterByte propery was added.
-  public static final int BLUETOOTHSERVER_COMPONENT_VERSION = 4;
+  // - The BluetoothServer.DelimiterByte property was added.
+  // For BLUETOOTHSERVER_COMPONENT_VERSION 5:
+  // - The BluetoothServer.Secure property was added.
+  public static final int BLUETOOTHSERVER_COMPONENT_VERSION = 5;
 
   // For BUTTON_COMPONENT_VERSION 2:
   // - The Alignment property was renamed to TextAlignment.
